@@ -2,9 +2,10 @@ import logging
 import os
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
-from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 # --- Импорты для GigaChat ---
@@ -23,8 +24,22 @@ logging.basicConfig(
 )
 
 print("=" * 60)
-print("СТАРТ: Бот V-FINAL + КНОПКИ (Python 3.11+)")
+print("СТАРТ: Бот V-FINAL + КНОПКИ + ВЕБ-СЕРВЕР (Python 3.11+)")
 print("=" * 60)
+
+# --- ФИКТИВНЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+# Render требует, чтобы приложение слушало порт, иначе деплой зависает.
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server.serve_forever()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
@@ -87,7 +102,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data['awaiting'] = 'reminder_text'
     elif data == "help":
         await query.edit_message_text(
-            "📖 **Что я умею:**\n"
+            "📖 *Что я умею:*\n"
             "1. Отвечать на любые вопросы через GigaChat.\n"
             "2. Показывать погоду (напиши: Погода Москва).\n"
             "3. Показывать курсы валют (кнопка).\n"
@@ -116,9 +131,8 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 2. Обработка напоминания
     if awaiting == 'reminder_text' or text.lower().startswith("напомни"):
         context.user_data['awaiting'] = None
-        # Простейший парсер: "напомни через X минут/часов <текст>"
         parts = text.lower().split()
-        delay = 5  # по умолчанию 5 минут
+        delay = 5
         reminder_text = text
 
         if "через" in parts:
@@ -131,13 +145,11 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         delay *= 60
                     elif "сек" in unit:
                         delay = max(1, delay // 60)
-                    # Извлекаем сам текст напоминания
                     reminder_text = " ".join(parts[idx + 3:]) or "Напоминание"
                 except ValueError:
                     delay = 5
 
-        # Ставим задачу
-        job = context.job_queue.run_once(
+        context.job_queue.run_once(
             send_reminder,
             delay * 60,
             data={"chat_id": chat_id, "text": reminder_text}
@@ -179,7 +191,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
     await context.bot.send_message(
         chat_id=job.data['chat_id'],
-        text=f"⏰ **Напоминание:** {job.data['text']}",
+        text=f"⏰ *Напоминание:* {job.data['text']}",
         parse_mode="Markdown"
     )
 
@@ -188,6 +200,10 @@ async def main():
     if not TOKEN or not GIGACHAT_KEY:
         logging.error("FATAL: Токены не найдены в .env")
         return
+
+    # Запускаем фиктивный веб-сервер в отдельном потоке для Render
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    print("✅ Фиктивный веб-сервер запущен для Render.")
 
     giga_client = GigaChat(
         scope="GIGACHAT_API_PERS", 
@@ -198,7 +214,6 @@ async def main():
     application = Application.builder().token(TOKEN).build()
     application.bot_data['gigachat_client'] = giga_client
 
-    # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
@@ -218,122 +233,4 @@ async def main():
     loop.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())import logging
-import os
-import asyncio
-from dotenv import load_dotenv
-from telegram import Update, ForceReply
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-
-# --- Импорты для GigaChat ---
-from gigachat import GigaChat
-from gigachat.models import Chat, Messages, MessagesRole
-
-# --- Загрузка ключей из файла .env ---
-load_dotenv()
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GIGACHAT_KEY = os.environ.get("GIGACHAT_API_KEY")
-
-# --- Настройка логирования ---
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-print("=" * 60)
-print("СТАРТ: Бот V-FINAL (Python 3.11)")
-print("=" * 60)
-
-
-# --- ОБРАБОТЧИК КОМАНДЫ /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    name = update.effective_user.first_name
-    await update.message.reply_text(
-        f"Привет, {name}! 👋\n"
-        f"Я бот V-Final. Я живу на Python 3.11.\n\n"
-        "Напиши мне что-нибудь, и я отвечу.",
-        reply_markup=ForceReply(selective=True),
-    )
-
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    chat_id = update.effective_chat.id
-
-    # Достаем клиента из "рюкзака" бота
-    client = context.bot_data.get('gigachat_client')
-    if not client:
-        await update.message.reply_text("Клиент GigaChat не инициализирован.")
-        return
-
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
-    try:
-        # --- ИСПРАВЛЕННЫЙ БЛОК ЗАПРОСА ---
-        # Создаем объект Chat с актуальной моделью
-        chat_request = Chat(
-            model="GigaChat-2",  # <-- ИСПРАВЛЕНИЕ: заменили "GigaChat" на "GigaChat-2"
-            messages=[
-                Messages(role=MessagesRole.USER, content=text)
-            ]
-        )
-        
-        # Отправляем запрос в GigaChat
-        response = client.chat(chat_request)
-        
-        # Проверяем, пришел ли ответ и есть ли в нем текст
-        if response and hasattr(response, 'choices') and response.choices:
-            answer = response.choices[0].message.content
-            await update.message.reply_text(
-                f"🤖 <b>Ответ GigaChat:</b>\n\n{answer}",
-                parse_mode="HTML"
-            )
-        else:
-            print(f"WARNING: GigaChat вернул пустой ответ. Response: {response}")
-            await update.message.reply_text("Я получил пустой ответ от нейросети.")
-
-    except Exception as e:
-        logging.error(f"Ошибка GigaChat: {e}")
-        await update.message.reply_text(
-            f"Произошла ошибка при генерации ответа:\n{e}"
-        )
-
-# --- ГЛАВНАЯ ФУНКЦИЯ (Windows-friendly) ---
-async def main():
-    if not TOKEN or not GIGACHAT_KEY:
-        logging.error("FATAL: Токены не найдены в .env")
-        return
-
-    # Создаем клиента GigaChat ОДИН раз при старте
-    giga_client = GigaChat(
-        scope="GIGACHAT_API_PERS", 
-        credentials=GIGACHAT_KEY,
-        verify_ssl_certs=False
-    )
-
-    application = Application.builder().token(TOKEN).build()
-    
-    # Кладем клиента в "рюкзак" бота, чтобы функция echo могла его достать
-    application.bot_data['gigachat_client'] = giga_client
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-    print("✅ Бот готов к работе.")
-    
-    # Ручной цикл для обхода ошибок Python 3.11/3.14 в Windows
-    loop = asyncio.get_event_loop()
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-    
-    print("✅ Бот в сети. Жду сообщений...")
-    await asyncio.Event().wait() # Держим программу включенной
-
-    await application.updater.stop()
-    await application.stop()
-    loop.close()
-
-if __name__ == "__main__":
-    # Запускаем асинхронную функцию
     asyncio.run(main())
