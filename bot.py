@@ -1,19 +1,18 @@
 import logging
 import os
 import asyncio
-from datetime import timedelta
+import datetime
 from dotenv import load_dotenv
 
 import aiohttp
+import caldav
 
-# Импорты из python-telegram-bot
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
     CallbackQueryHandler, filters
 )
 
-# Импорты GigaChat
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
@@ -27,18 +26,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Системный промпт ---
-SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицированный и проактивный ассистент. Твоя главная цель — помогать мне решать задачи максимально эффективно, глубоко и качественно.
-Правила и стиль общения:
-1. Структурированность: Всегда представляй информацию в удобном виде: используй списки, подзаголовки, таблицы или выделение жирным, чтобы текст легко читался.
-2. Проактивность: Не просто отвечай на вопрос, а старайся предвидеть следующий шаг. Если я прошу проанализировать текст, предложи также варианты его улучшения. Если я ставлю цель, предложи план её достижения. Задавай уточняющие вопросы, если тебе не хватает данных.
-3. Честность и прозрачность: Если ты не знаешь ответа или не уверен в чем-то — прямо скажи об этом. Не придумывай факты, даты или источники. Если для качественного ответа нужно что-то уточнить у меня, задай вопрос.
-4. Краткость и суть: Избегай «воды», общих фраз и повторов. Переходи сразу к делу. Если ответ можно дать в трех предложениях, не пиши три абзаца.
-5. Адаптивность: Подстраивайся под мой контекст. Если я пишу неформально — отвечай так же. Если мы обсуждаем серьезный документ — используй деловой язык.
-Как мы будем работать:
-• Когда я ставлю задачу, сначала кратко перескажи её своими словами, чтобы я убедился, что мы поняли друг друга.
-• Если задача сложная, предложи пошаговый план её решения перед тем, как начать действовать.
-Начнём."""
+SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицированный и проактивный ассистент... (оставьте ваш промпт)"""
+
+
+# --- CalDAV Mail.ru ---
+async def add_mailru_event(summary: str, start_time: datetime.datetime) -> bool:
+    email = os.environ.get("MAILRU_EMAIL")
+    password = os.environ.get("MAILRU_PASSWORD")
+    if not email or not password:
+        logger.error("MAILRU_EMAIL или MAILRU_PASSWORD не заданы.")
+        return False
+
+    def _sync_create():
+        with caldav.DAVClient(
+            url="https://caldav.mail.ru/",
+            username=email,
+            password=password
+        ) as client:
+            principal = client.principal()
+            calendars = principal.calendars()
+            if not calendars:
+                raise RuntimeError("В аккаунте Mail.ru не найдено календарей.")
+            calendar = calendars[0]
+            end_time = start_time + datetime.timedelta(hours=1)
+            calendar.save_event(dtstart=start_time, dtend=end_time, summary=summary)
+            return True
+
+    try:
+        return await asyncio.to_thread(_sync_create)
+    except Exception as e:
+        logger.error(f"Ошибка CalDAV Mail.ru: {e}")
+        return False
 
 
 # --- Вспомогательные функции ---
@@ -81,13 +99,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
          InlineKeyboardButton("❓ Помощь", callback_data="help")],
         [InlineKeyboardButton("🤖 Спросить GigaChat", callback_data="gigachat")]
     ]
-
     greeting = (
         f"Привет, *{name}*! Я твой персональный ассистент.\n\n"
         "*Я сохраняю историю диалога и подстраиваюсь под тебя.*\n"
         "Выбери кнопку или напиши мне."
     )
-
     await update.message.reply_html(greeting, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -96,7 +112,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     data = query.data
 
-    # Безопасная инициализация на случай, если пользователь нажал кнопку без /start
     if 'history' not in context.user_data:
         context.user_data['history'] = []
     if 'awaiting' not in context.user_data:
@@ -105,28 +120,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "weather":
         await query.edit_message_text("Напиши город, для которого нужна погода (например: Москва)")
         context.user_data['awaiting'] = {'type': 'city_input'}
-
     elif data == "currency":
         message_text = await get_currency()
         try:
             await query.edit_message_text(message_text, parse_mode='HTML')
         except Exception:
             await query.message.reply_text(message_text, parse_mode='HTML')
-
     elif data == "remind":
         text = "⏰ Напиши текст напоминания.\n\nПример:\nНапомнить мне через 5 минут позвонить маме."
         await query.edit_message_text(text)
         context.user_data['awaiting'] = {'type': 'reminder_setup'}
-
     elif data == "help":
         help_text = """📖 Я умею:
 • Отвечать на вопросы (с памятью!)
 • Показывать погоду 🌤
 • Курсы валют 💱
-• Ставить напоминания ⏰
+• Ставить напоминания в календарь Mail.ru ⏰
 • Работать с GigaChat 🤖"""
         await query.edit_message_text(help_text, parse_mode='Markdown')
-
     elif data == "gigachat":
         await query.edit_message_text("❓ Задай свой вопрос здесь.")
         context.user_data['awaiting'] = {'type': 'free_question'}
@@ -136,7 +147,6 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    # Безопасная инициализация для новых пользователей (без /start)
     if 'history' not in context.user_data:
         context.user_data['history'] = []
     if 'awaiting' not in context.user_data:
@@ -144,7 +154,42 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     awaiting_info = context.user_data.get('awaiting')
 
-    # --- 1. Проверка на ввод данных после кнопок ---
+    # --- Напоминание в календарь Mail.ru ---
+    if awaiting_info and awaiting_info.get('type') == 'reminder_setup':
+        parts = user_text.lower().split()
+        time_idx = next((i for i, w in enumerate(parts) if w.isdigit()), None)
+        if not time_idx or len(parts) < time_idx + 2:
+            await update.message.reply_text(
+                "Не понял формат. Пример: Напомни через 15 минут позвонить маме"
+            )
+            return
+
+        delay_value = int(parts[time_idx])
+        unit_word = parts[time_idx + 1]
+        multiplier = 60 if unit_word.startswith(('час', 'часа')) else 1
+        final_delay_seconds = delay_value * multiplier
+
+        reminder_text = " ".join(parts[time_idx + 2:]).strip() or "Напоминание"
+
+        moscow_tz = datetime.timezone(datetime.timedelta(hours=3))
+        start_time = datetime.datetime.now(moscow_tz) + datetime.timedelta(seconds=final_delay_seconds)
+
+        await update.message.reply_text("⏳ Создаю событие в календаре Mail.ru...")
+        success = await add_mailru_event(reminder_text, start_time)
+
+        if success:
+            time_str = start_time.strftime("%H:%M")
+            await update.message.reply_html(
+                f"✅ Напоминание добавлено в календарь Mail.ru на <b>{time_str}</b>: {reminder_text}"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Не удалось создать событие. Проверьте логи или настройки календаря."
+            )
+        context.user_data.pop('awaiting', None)
+        return
+
+    # --- Погода ---
     if awaiting_info and awaiting_info.get('type') == 'city_input':
         city = user_text.strip()
         weather_msg = await get_weather(city)
@@ -152,30 +197,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop('awaiting', None)
         return
 
-    if awaiting_info and awaiting_info.get('type') == 'reminder_setup':
-        reminder_parts = user_text.lower().split()
-        time_idx = next((i for i, w in enumerate(reminder_parts) if w.isdigit()), None)
-
-        if not time_idx or len(reminder_parts) < time_idx + 2:
-            await update.message.reply_text("Не понял формат времени. Пример: Напомни через 15 минут проверить почту")
-            return
-
-        delay_min = int(reminder_parts[time_idx])
-        unit_word = reminder_parts[time_idx + 1]
-        multiplier = 60 if unit_word.endswith(('час', 'часа')) else 1
-
-        final_delay = delay_min * multiplier
-        reminder_text = " ".join(reminder_parts[time_idx + 2:])
-        if not reminder_text:
-            reminder_text = "Ваше напоминание"
-
-        job_context = {"chat_id": chat_id, "text": reminder_text}
-        context.job_queue.run_once(send_reminder, final_delay, data=job_context)
-        await update.message.reply_html(f"✅ Готово! Напомню вам через <b>{final_delay} мин</b>: {reminder_text}")
-        context.user_data.pop('awaiting', None)
-        return
-
-    # --- 2. Инициализация GigaChat (Один раз на бота) ---
+    # --- GigaChat ---
     if 'gigachat_client' not in context.bot_data:
         try:
             context.bot_data['gigachat_client'] = GigaChat(
@@ -183,112 +205,71 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 credentials=GIGACHAT_KEY,
                 verify_ssl_certs=False
             )
-            logger.info("✅ GigaChat клиент создан и сохранен в bot_data.")
+            logger.info("✅ GigaChat клиент создан.")
         except Exception as e:
-            logger.error(f"FATAL: Не удалось создать клиента GigaChat: {e}")
-            await update.message.reply_text("❌ Ошибка подключения к GigaChat. Попробуй позже.")
+            logger.error(f"FATAL: GigaChat: {e}")
+            await update.message.reply_text("❌ Ошибка подключения к GigaChat.")
             return
 
-    # --- 3. Отправка статуса "печатает" ---
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # --- 4. Формирование запроса ---
     client = context.bot_data['gigachat_client']
     messages = [Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)]
 
     history = context.user_data.get('history', [])
-    history_limit = min(len(history), 20)
-    recent_history = history[-history_limit:] if history_limit else []
-
-    for msg_dict in recent_history:
-        role_str = msg_dict.get('role')
-        content = msg_dict.get('content')
-        if role_str and content:
-            roles_map = {
-                'user': MessagesRole.USER,
-                'assistant': MessagesRole.ASSISTANT,
-                'system': MessagesRole.SYSTEM
-            }
-            mapped_role = roles_map.get(role_str.lower())
-            if mapped_role:
-                messages.append(Messages(role=mapped_role, content=content))
-
+    recent = history[-20:] if len(history) > 20 else history
+    for msg in recent:
+        if msg.get('role') and msg.get('content'):
+            role_map = {'user': MessagesRole.USER, 'assistant': MessagesRole.ASSISTANT}
+            if msg['role'] in role_map:
+                messages.append(Messages(role=role_map[msg['role']], content=msg['content']))
     messages.append(Messages(role=MessagesRole.USER, content=user_text))
 
-    # --- 5. Запрос к API и ответ ---
     try:
         response = await asyncio.to_thread(
             client.chat, Chat(model="GigaChat-2", messages=messages)
         )
-
-        answer_content = ""
         if response and response.choices and response.choices[0].message.content:
-            answer_content = response.choices[0].message.content
-
+            answer = response.choices[0].message.content
             context.user_data['history'].append({'role': 'user', 'content': user_text})
-            context.user_data['history'].append({'role': 'assistant', 'content': answer_content})
-
+            context.user_data['history'].append({'role': 'assistant', 'content': answer})
             if len(context.user_data['history']) > 40:
                 context.user_data['history'] = context.user_data['history'][-40:]
-
-            await update.message.reply_html(f"<b>Ответ:</b>\n\n{answer_content}")
+            await update.message.reply_html(f"<b>Ответ:</b>\n\n{answer}")
         else:
-            logger.warning("GigaChat вернул пустой ответ.")
-            await update.message.reply_text("Нейросеть ответила пустотой. Попробуй переформулировать вопрос.")
-
+            await update.message.reply_text("Нейросеть ответила пустотой.")
     except Exception as e:
         error_msg = str(e).replace("\n", " ").replace("\r", "")
-        logger.error(f"Ошибка GigaChat: {error_msg}")
-        await update.message.reply_text(
-            f"⚠️ Ошибка связи с GigaChat:\n<code>{error_msg}</code>",
-            parse_mode='HTML'
-        )
-
-
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job = context.job
-    await context.bot.send_message(
-        chat_id=job.data['chat_id'],
-        text=f"⏰ *Напоминание:* {job.data['text']}",
-        parse_mode='Markdown'
-    )
+        logger.error(f"GigaChat: {error_msg}")
+        await update.message.reply_text(f"⚠️ Ошибка GigaChat:\n<code>{error_msg}</code>", parse_mode='HTML')
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Логирует ошибки и сообщает пользователю."""
-    logger.error("Exception while handling an update:", exc_info=context.error)
+    logger.error("Exception:", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
-            await update.effective_message.reply_text(
-                "⚠️ Произошла внутренняя ошибка. Попробуйте ещё раз."
-            )
+            await update.effective_message.reply_text("⚠️ Внутренняя ошибка. Попробуйте ещё раз.")
         except Exception:
             pass
 
 
-# --- Точка входа ---
 def main() -> None:
     if not TOKEN:
-        logger.error("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
+        logger.error("❌ TELEGRAM_TOKEN не задан!")
         return
     if not GIGACHAT_KEY:
-        logger.error("❌ GIGACHAT_API_KEY не найден в переменных окружения!")
+        logger.error("❌ GIGACHAT_API_KEY не задан!")
         return
 
     logger.info("🚀 Запуск бота...")
-
-    application = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .build()
-    )
+    application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
     application.add_error_handler(error_handler)
 
-    logger.info("✅ Хендлеры зарегистрированы. Начинаю polling.")
+    logger.info("✅ Бот запущен в режиме polling.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
