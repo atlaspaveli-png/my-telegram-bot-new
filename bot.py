@@ -1,16 +1,17 @@
 import logging
 import os
 import asyncio
-import aiohttp
-import threading
-import signal
-from flask import Flask
+from datetime import timedelta
 from dotenv import load_dotenv
+
+# Импорты из python-telegram-bot
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters,
-    CallbackQueryHandler, PicklePersistence
+    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
+    CallbackQueryHandler, PicklePersistence, filters
 )
+
+# Импорты GigaChat
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
@@ -33,18 +34,7 @@ SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицир�
 • Если задача сложная, предложи пошаговый план её решения перед тем, как начать действовать.
 Начнём."""
 
-# --- FLASK ДЛЯ RENDER (Keep-alive) ---
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def health():
-    return "Bot is running!", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (Погода и Валюта) ---
+# --- Вспомогательные функции (Погода и Валюта) ---
 async def get_weather(city: str) -> str:
     try:
         async with aiohttp.ClientSession() as session:
@@ -68,9 +58,9 @@ async def get_currency() -> str:
     except Exception as e:
         return f"Ошибка: {e}"
 
-# --- ОБРАБОТЧИКИ ---
+# --- Обработчики ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    name = update.effective_user.first_name
+    name = update.effective_user.first_name or "Пользователь"
     # Полная очистка данных пользователя при старте
     context.user_data.clear()
     context.user_data['history'] = []
@@ -84,12 +74,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("🤖 Спросить GigaChat", callback_data="gigachat")]
     ]
     
-    await update.message.reply_text(
-        f"Привет, {name}! Я твой персональный ассистент.\n\n"
-        f"Я сохраняю историю диалога и подстраиваюсь под тебя. "
-        f"Выбери кнопку или просто напиши мне.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+    greeting = (
+        f"Привет, *{name}*! Я твой персональный ассистент.\n\n"
+        "*Я сохраняю историю диалога и подстраиваюсь под тебя.*\n"
+        "Выбери кнопку или напиши мне."
     )
+    
+    await update.message.reply_html(greeting, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -98,47 +89,68 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "weather":
         await query.edit_message_text("Напиши город, для которого нужна погода (например: Москва)")
-        context.user_data['awaiting'] = 'weather_city'
+        context.user_data['awaiting'] = {'type': 'city_input'}
+        
     elif data == "currency":
-        await query.edit_message_text(await get_currency())
+        message_text = await get_currency()
+        try:
+            await query.edit_message_text(message_text, parse_mode='HTML')
+        except Exception:
+            await query.message.reply_text(message_text, parse_mode='HTML')
+            
     elif data == "remind":
-        await query.edit_message_text("Напиши: 'Напомни через 10 минут проверить код'")
-        context.user_data['awaiting'] = 'reminder_text'
+        text = f"⏰ Напиши текст напоминания.\n\nПример:\nНапомнить мне через 5 минут позвонить маме."
+        await query.edit_message_text(text)
+        context.user_data['awaiting'] = {'type': 'reminder_setup'}
+        
     elif data == "help":
-        await query.edit_message_text("📖 Я умею:\n• Отвечать на вопросы (с памятью!)\n• Показывать погоду и курсы\n• Ставить напоминания\n• Работать с GigaChat", parse_mode="Markdown")
+        help_text = """📖 Я умею:
+• Отвечать на вопросы (с памятью!)
+• Показывать погоду 🌤
+• Курсы валют 💱
+• Ставить напоминания ⏰
+• Работать с GigaChat 🤖"""
+        await query.edit_message_text(help_text, parse_mode='Markdown')
+        
     elif data == "gigachat":
-        await query.edit_message_text("Напиши свой вопрос. Я запомню контекст нашего диалога.")
-        context.user_data['awaiting'] = 'gigachat'
+        await query.edit_message_text("❓ Задай свой вопрос здесь.")
+        context.user_data['awaiting'] = {'type': 'free_question'}
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
+    user_text = update.message.text
     chat_id = update.effective_chat.id
-    awaiting = context.user_data.get('awaiting')
-
-    # --- 1. Обработка спец. команд (Погода, Напоминания) ---
-    if awaiting == 'weather_city':
-        context.user_data['awaiting'] = None
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        await update.message.reply_text(f"🌤 Погода в {text}:\n{await get_weather(text)}")
+    
+    awaiting_info = context.user_data.get('awaiting')
+    
+    # --- 1. Проверка на ввод данных после кнопок ---
+    if awaiting_info and awaiting_info.get('type') == 'city_input':
+        city = user_text.strip()
+        weather_msg = await get_weather(city)
+        await update.message.reply_html(f"<b>Погода в {city}:</b>\n{weather_msg}")
+        context.user_data.pop('awaiting', None)
         return
 
-    if awaiting == 'reminder_text' or text.lower().startswith("напомни"):
-        context.user_data['awaiting'] = None
-        # Простая логика напоминания (можно усложнить)
-        try:
-            parts = text.lower().replace('напомни', '').strip().split()
-            if 'через' in parts:
-                idx = parts.index('через')
-                delay = int(parts[idx + 1])
-                unit = parts[idx + 2]
-                if 'час' in unit: delay *= 60
-                reminder_msg = " ".join(parts[idx + 3:]) or "Напоминание"
-                context.job_queue.run_once(send_reminder, delay * 60, data={"chat_id": chat_id, "text": reminder_msg})
-                await update.message.reply_text(f"✅ Напомню через {delay} мин: {reminder_msg}")
-            else:
-                await update.message.reply_text("Я не понял время. Напиши: 'Напомни через 5 минут Текст'")
-        except Exception:
-            await update.message.reply_text("Ошибка в формате. Пример: Напомни через 10 минут выпить воды")
+    if awaiting_info and awaiting_info.get('type') == 'reminder_setup':
+        reminder_parts = user_text.lower().split()
+        time_idx = next((i for i, w in enumerate(reminder_parts) if w.isdigit()), None)
+        
+        if not time_idx or len(reminder_parts) < time_idx+2:
+            await update.message.reply_text("Не понял формат времени. Пример: Напомни через 15 минут проверить почту")
+            return
+            
+        delay_min = int(reminder_parts[time_idx])
+        unit_word = reminder_parts[time_idx+1]
+        multiplier = 60 if unit_word.endswith(('час', 'часа')) else 1
+        
+        final_delay = delay_min * multiplier
+        reminder_text = " ".join(reminder_parts[time_idx+2:])
+        if not reminder_text:
+            reminder_text = "Ваше напоминание"
+            
+        job_context = {"chat_id": chat_id, "text": reminder_text}
+        context.job_queue.run_once(send_reminder, final_delay, data=job_context)
+        await update.message.reply_html(f"✅ Готово! Напомню вам через <b>{final_delay} мин</b>: {reminder_text}")
+        context.user_data.pop('awaiting', None)
         return
 
     # --- 2. Инициализация GigaChat (Один раз на бота) ---
@@ -155,61 +167,63 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("❌ Ошибка подключения к GigaChat. Попробуй позже.")
             return
 
-    # --- 3. Подготовка истории (Гарантированная защита от KeyError) ---
-    if 'history' not in context.user_data:
-        context.user_data['history'] = []
-
-    # --- 4. Отправка статуса "печатает" ---
+    # --- 3. Отправка статуса "печатает" ---
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # --- 5. Формирование запроса ---
+    # --- 4. Формирование запроса ---
     client = context.bot_data['gigachat_client']
     messages = [Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)]
     
-    # Берем последние 20 сообщений, проверяя их целостность
-    for msg in context.user_data['history'][-20:]:
-        if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
-            messages.append(Messages(role=msg['role'], content=msg['content']))
-            
-    messages.append(Messages(role=MessagesRole.USER, content=text))
+    history_limit = min(len(context.user_data['history']), 20)
+    recent_history = context.user_data['history'][-history_limit:]
+    
+    for msg_dict in reversed(recent_history):
+        role_str = msg_dict.get('role')
+        content = msg_dict.get('content')
+        if role_str and content:
+            roles_map = {
+                'user': MessagesRole.USER,
+                'assistant': MessagesRole.ASSISTANT,
+                'system': MessagesRole.SYSTEM
+            }
+            mapped_role = roles_map.get(role_str.lower())
+            if mapped_role:
+                messages.insert(-1, Messages(role=mapped_role, content=content)) # Вставляем перед последним USER
 
-    # --- 6. Запрос к API и ответ ---
+    messages.append(Messages(role=MessagesRole.USER, content=user_text))
+
+    # --- 5. Запрос к API и ответ ---
     try:
-        chat_request = Chat(model="GigaChat-2", messages=messages)
-        response = client.chat(chat_request)
-
-        # Проверка, что ответ вообще существует и не пустой
+        response = client.chat(Chat(model="GigaChat-2", messages=messages))
+        
+        answer_content = ""
         if response and response.choices and response.choices[0].message.content:
-            answer = response.choices[0].message.content
+            answer_content = response.choices[0].message.content
             
-            # Сохраняем в историю
-            context.user_data['history'].append({'role': MessagesRole.USER, 'content': text})
-            context.user_data['history'].append({'role': MessagesRole.ASSISTANT, 'content': answer})
+            context.user_data['history'].append({'role':'user','content':user_text})
+            context.user_data['history'].append({'role':'assistant','content':answer_content})
             
-            # Ограничиваем размер истории, чтобы не переполнить контекст
             if len(context.user_data['history']) > 40:
                 context.user_data['history'] = context.user_data['history'][-40:]
-
-            await update.message.reply_text(f"🤖 <b>Ответ:</b>\n\n{answer}", parse_mode="HTML")
+                
+            await update.message.reply_html(f"<b>Ответ:</b>\n\n{answer_content}")
         else:
             logging.warning("GigaChat вернул пустой ответ.")
             await update.message.reply_text("Нейросеть ответила пустотой. Попробуй переформулировать вопрос.")
             
     except Exception as e:
-        logging.error(f"Ошибка при запросе к GigaChat: {e}")
-        await update.message.reply_text(f"⚠️ Произошла ошибка связи с GigaChat:\n{e}")
+        error_msg = str(e).replace("\n", " ").replace("\r", "")
+        await update.message.reply_text(f"⚠️ Ошибка связи с GigaChat:\n<code>{error_msg}</code>", parse_mode='HTML')
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
-    await context.bot.send_message(chat_id=job.data['chat_id'], text=f"⏰ *Напоминание:* {job.data['text']}", parse_mode="Markdown")
+    await context.bot.send_message(chat_id=job.data['chat_id'], text=f"⏰ *Напоминание:* {job.data['text']}", parse_mode='Markdown')
 
 # --- ГЛАВНАЯ ТОЧКА ЗАПУСКА ---
 async def main():
     if not TOKEN or not GIGACHAT_KEY:
         logging.error("FATAL: Токены не найдены в переменных окружения.")
         return
-
-    threading.Thread(target=run_flask, daemon=True).start()
 
     persistence = PicklePersistence(filepath="bot_persistence.pkl")
     
@@ -223,26 +237,13 @@ async def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-    stop_event = asyncio.Event()
-    def handle_sigterm():
-        logging.info("Получен SIGTERM, останавливаю...")
-        stop_event.set()
-    try:
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
-    except NotImplementedError:
-        signal.signal(signal.SIGTERM, lambda s, f: handle_sigterm())
-
+    print("✅ Бот запущен. Память сохраняется в bot_persistence.pkl.")
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
-    print("✅ Бот в сети. Память сохраняется в bot_persistence.pkl.")
 
-    await stop_event.wait()
-
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
+    # Чтобы бот работал бесконечно
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
