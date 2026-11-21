@@ -1,3 +1,5 @@
 python-telegram-bot==22.8
 gigachat==0.2.4
 python-dotenv
+aiohttp
+flask
