@@ -1,8 +1,5 @@
-python-telegram-bot==22.8
-gigachat==0.2.4
+python-telegram-bot[job-queue]==21.6
+gigachat
 python-dotenv
 aiohttp
-flask
-gunicorn
-uvicorn #
-caldav==0.8.1
+caldav
