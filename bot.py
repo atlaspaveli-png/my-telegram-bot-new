@@ -7,7 +7,7 @@ import signal
 from flask import Flask
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler, PicklePersistence
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
@@ -79,7 +79,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     await update.message.reply_text(
         f"Привет, {name}! Выбери действие или напиши текст.\n"
-        f"Теперь я запоминаю контекст и отвечаю как твой персональный ассистент.",
+        f"Теперь я запоминаю контекст (даже после перезапуска) и отвечаю как твой персональный ассистент.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -187,8 +187,16 @@ async def main():
     threading.Thread(target=run_flask, daemon=True).start()
     print("✅ Flask-сервер для Render запущен.")
 
+    # --- ДОБАВЛЕНА ПОСТОЯННАЯ ПАМЯТЬ (PicklePersistence) ---
+    persistence = PicklePersistence(filepath="bot_persistence.pkl")
+    
     giga_client = GigaChat(scope="GIGACHAT_API_PERS", credentials=GIGACHAT_KEY, verify_ssl_certs=False)
-    application = Application.builder().token(TOKEN).build()
+    
+    application = Application.builder()\
+        .token(TOKEN)\
+        .persistence(persistence)\
+        .build()
+    
     application.bot_data['gigachat_client'] = giga_client
 
     application.add_handler(CommandHandler("start", start))
@@ -208,7 +216,7 @@ async def main():
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
-    print("✅ Бот в сети.")
+    print("✅ Бот в сети. Память сохраняется в bot_persistence.pkl.")
 
     await stop_event.wait()
 
