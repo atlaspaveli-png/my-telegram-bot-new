@@ -59,7 +59,6 @@ async def get_currency() -> str:
         return f"Ошибка: {e}"
 
 # --- Обработчики ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name or "Пользователь"
     # Полная очистка данных пользователя при старте
@@ -183,7 +182,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if role_str and content:
             roles_map = {
                 'user': MessagesRole.USER,
-                'assistant': MessagesRole.ASSISTANT, # Исправлена опечатка 'assector'
+                'assistant': MessagesRole.ASSISTANT,
                 'system': MessagesRole.SYSTEM
             }
             mapped_role = roles_map.get(role_str.lower())
@@ -201,7 +200,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             answer_content = response.choices[0].message.content
             
             context.user_data['history'].append({'role':'user','content':user_text})
-            context.user_data['history'].append({'role':'assistant','content':answer_content}) # Исправлено 'assector'
+            context.user_data['history'].append({'role':'assistant','content':answer_content})
             
             if len(context.user_data['history']) > 40:
                 context.user_data['history'] = context.user_data['history'][-40:]
@@ -218,32 +217,3 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
     await context.bot.send_message(chat_id=job.data['chat_id'], text=f"⏰ *Напоминание:* {job.data['text']}", parse_mode='Markdown')
-
-# --- ГЛАВНАЯ ТОЧКА ЗАПУСКА ---
-async def main():
-    if not TOKEN or not GIGACHAT_KEY:
-        logging.error("FATAL: Токены не найдены в переменных окружения.")
-        return
-
-    persistence = PicklePersistence(filepath="bot_persistence.pkl")
-    
-    application = ApplicationBuilder()\
-        .token(TOKEN)\
-        .persistence(persistence)\
-        .concurrent_updates(True)\
-        .build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-    print("✅ Бот запущен. Память сохраняется в bot_persistence.pkl.")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-
-    # Чтобы бот работал бесконечно
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
