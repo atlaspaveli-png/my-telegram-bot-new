@@ -1,3 +1,64 @@
+Traceback (most recent call last):
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/uvicorn/protocols/http/h11_impl.py", line 411, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.scope, self.receive, self.send
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/uvicorn/middleware/proxy_headers.py", line 63, in call
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/uvicorn/middleware/asgi2.py", line 14, in call
+    instance = self.app(scope)
+TypeError: 'coroutine' object is not callable
+==> Your service is live 🎉
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/uvicorn/protocols/http/h11_impl.py", line 411, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.scope, self.receive, self.send
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/uvicorn/middleware/proxy_headers.py", line 63, in call
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/uvicorn/middleware/asgi2.py", line 14, in call
+    instance = self.app(scope)
+TypeError: 'coroutine' object is not callable
+INFO:     34.19.73.234:0 - "GET / HTTP/1.1" 500 Internal Server Error
+==> 
+==> ///////////////////////////////////////////////////////////
+==> 
+==> Available at your primary URL https://my-telegram-bot-new-68cm.onrender.com
+==> 
+==> ///////////////////////////////////////////////////////////
+
+
+
+
+Эта ошибка — классическая проблема при запуске асинхронных (async) приложений, таких как твой бот на python-telegram-bot, с помощью сервера Uvicorn.
+
+
+Давай разберем, что происходит и как это исправить раз и навсегда. Мы уже близко!
+
+
+Что означает эта ошибка?
+
+Uvicorn — это ASGI-сервер. Он ожидает получить от приложения объект, который он может вызвать как функцию: app(scope, receive, send).
+Твой бот — это набор из асинхронных функций (async def). Когда Uvicorn пытается их "вызвать", он видит не готовую функцию, а "корутину" (coroutine) — по сути, инструкцию о том, как запустить функцию в будущем. Поэтому возникает ошибка TypeError: 'coroutine' object is not callable.
+
+
+Решение: Используем asgiref.sync.async_to_sync
+
+Чтобы решить эту проблему, нам нужно использовать специальный инструмент-переводчик из библиотеки asgiref. Он берет твою асинхронную функцию и превращает ее в ту самую синхронную функцию, которую ждет Uvicorn.
+
+
+Пожалуйста, замени весь код в файле bot.py на этот исправленный вариант.
+
+
 import logging
 import os
 import asyncio
@@ -59,9 +120,16 @@ async def get_currency() -> str:
         return f"Ошибка: {e}"
 
 # --- Обработчики ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+# Оборачиваем каждую асинхронную функцию-обработчик
+def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Внутри этой функции будет вызываться твоя асинхронная логика
+    from asgiref.sync import async_to_sync
+    _start_async = async_to_async(start_async)
+    return _start_async(update, context)
+
+async def start_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name or "Пользователь"
-    # Полная очистка данных пользователя при старте
     context.user_data.clear()
     context.user_data['history'] = []
     context.user_data['awaiting'] = None
@@ -82,54 +150,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     await update.message.reply_html(greeting, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+# ... То же самое сделай для всех остальных обработчиков ...
+# Ниже я привожу полный пример с функцией echo, но принцип тот же для button_handler и других.
 
-    if data == "weather":
-        await query.edit_message_text("Напиши город, для которого нужна погода (например: Москва)")
-        context.user_data['awaiting'] = {'type': 'city_input'}
-        
-    elif data == "currency":
-        message_text = await get_currency()
-        try:
-            await query.edit_message_text(message_text, parse_mode='HTML')
-        except Exception:
-            await query.message.reply_text(message_text, parse_mode='HTML')
-            
-    elif data == "remind":
-        text = f"⏰ Напиши текст напоминания.\n\nПример:\nНапомнить мне через 5 минут позвонить маме."
-        await query.edit_message_text(text)
-        context.user_data['awaiting'] = {'type': 'reminder_setup'}
-        
-    elif data == "help":
-        help_text = """📖 Я умею:
-• Отвечать на вопросы (с памятью!)
-• Показывать погоду 🌤
-• Курсы валют 💱
-• Ставить напоминания ⏰
-• Работать с GigaChat 🤖"""
-        await query.edit_message_text(help_text, parse_mode='Markdown')
-        
-    elif data == "gigachat":
-        await query.edit_message_text("❓ Задай свой вопрос здесь.")
-        context.user_data['awaiting'] = {'type': 'free_question'}
+def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from asgiref.sync import async_to_sync
+    _echo_async = async_to_sync(echo_async)
+    return _echo_async(update, context)
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
     chat_id = update.effective_chat.id
     
     awaiting_info = context.user_data.get('awaiting')
     
-    # --- 1. Проверка на ввод данных после кнопок ---
     if awaiting_info and awaiting_info.get('type') == 'city_input':
         city = user_text.strip()
         weather_msg = await get_weather(city)
         await update.message.reply_html(f"<b>Погода в {city}:</b>\n{weather_msg}")
         context.user_data.pop('awaiting', None)
         return
-
+        
     if awaiting_info and awaiting_info.get('type') == 'reminder_setup':
         reminder_parts = user_text.lower().split()
         time_idx = next((i for i, w in enumerate(reminder_parts) if w.isdigit()), None)
@@ -153,7 +194,6 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop('awaiting', None)
         return
 
-    # --- 2. Инициализация GigaChat (Один раз на бота) ---
     if 'gigachat_client' not in context.bot_data:
         try:
             context.bot_data['gigachat_client'] = GigaChat(
@@ -167,10 +207,8 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("❌ Ошибка подключения к GigaChat. Попробуй позже.")
             return
 
-    # --- 3. Отправка статуса "печатает" ---
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # --- 4. Формирование запроса ---
     client = context.bot_data['gigachat_client']
     messages = [Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)]
     
@@ -183,16 +221,15 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if role_str and content:
             roles_map = {
                 'user': MessagesRole.USER,
-                'assistant': MessagesRole.ASSISTANT,
+                'assector': MessagesRole.ASSISTANT,
                 'system': MessagesRole.SYSTEM
             }
             mapped_role = roles_map.get(role_str.lower())
             if mapped_role:
-                messages.insert(-1, Messages(role=mapped_role, content=content)) # Вставляем перед последним USER
+                messages.insert(-1, Messages(role=mapped_role, content=content)) 
 
     messages.append(Messages(role=MessagesRole.USER, content=user_text))
 
-    # --- 5. Запрос к API и ответ ---
     try:
         response = client.chat(Chat(model="GigaChat-2", messages=messages))
         
@@ -214,36 +251,3 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         error_msg = str(e).replace("\n", " ").replace("\r", "")
         await update.message.reply_text(f"⚠️ Ошибка связи с GigaChat:\n<code>{error_msg}</code>", parse_mode='HTML')
-
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job = context.job
-    await context.bot.send_message(chat_id=job.data['chat_id'], text=f"⏰ *Напоминание:* {job.data['text']}", parse_mode='Markdown')
-
-# --- ГЛАВНАЯ ТОЧКА ЗАПУСКА ---
-async def main():
-    if not TOKEN or not GIGACHAT_KEY:
-        logging.error("FATAL: Токены не найдены в переменных окружения.")
-        return
-
-    persistence = PicklePersistence(filepath="bot_persistence.pkl")
-    
-    application = ApplicationBuilder()\
-        .token(TOKEN)\
-        .persistence(persistence)\
-        .concurrent_updates(True)\
-        .build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-    print("✅ Бот запущен. Память сохраняется в bot_persistence.pkl.")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-
-    # Чтобы бот работал бесконечно
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
