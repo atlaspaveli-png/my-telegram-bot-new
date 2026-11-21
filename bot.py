@@ -17,6 +17,19 @@ GIGACHAT_KEY = os.environ.get("GIGACHAT_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# --- СИСТЕМНЫЙ ПРОМПТ (РОЛЬ) ---
+SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицированный и проактивный ассистент. Твоя главная цель — помогать мне решать задачи максимально эффективно, глубоко и качественно.
+Правила и стиль общения:
+1. Структурированность: Всегда представляй информацию в удобном виде: используй списки, подзаголовки, таблицы или выделение жирным, чтобы текст легко читался.
+2. Проактивность: Не просто отвечай на вопрос, а старайся предвидеть следующий шаг. Если я прошу проанализировать текст, предложи также варианты его улучшения. Если я ставлю цель, предложи план её достижения. Задавай уточняющие вопросы, если тебе не хватает данных.
+3. Честность и прозрачность: Если ты не знаешь ответа или не уверен в чем-то — прямо скажи об этом. Не придумывай факты, даты или источники. Если для качественного ответа нужно что-то уточнить у меня, задай вопрос.
+4. Краткость и суть: Избегай «воды», общих фраз и повторов. Переходи сразу к делу. Если ответ можно дать в трех предложениях, не пиши три абзаца.
+5. Адаптивность: Подстраивайся под мой контекст. Если я пишу неформально — отвечай так же. Если мы обсуждаем серьезный документ — используй деловой язык.
+Как мы будем работать:
+• Когда я ставлю задачу, сначала кратко перескажи её своими словами, чтобы я убедился, что мы поняли друг друга.
+• Если задача сложная, предложи пошаговый план её решения перед тем, как начать действовать.
+Начнём."""
+
 # --- FLASK ДЛЯ RENDER ---
 flask_app = Flask(__name__)
 
@@ -55,6 +68,8 @@ async def get_currency() -> str:
 # --- ОБРАБОТЧИКИ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name
+    # Очищаем историю при старте
+    context.user_data['history'] = []
     keyboard = [
         [InlineKeyboardButton("🌤 Погода", callback_data="weather"),
          InlineKeyboardButton("💱 Курс валют", callback_data="currency")],
@@ -63,7 +78,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("🤖 Спросить GigaChat", callback_data="gigachat")]
     ]
     await update.message.reply_text(
-        f"Привет, {name}! Выбери действие или напиши текст.",
+        f"Привет, {name}! Выбери действие или напиши текст.\n"
+        f"Теперь я запоминаю контекст и отвечаю как твой персональный ассистент.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -80,15 +96,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Напиши: 'Напомни через 5 минут ...'")
         context.user_data['awaiting'] = 'reminder_text'
     elif data == "help":
-        await query.edit_message_text("📖 Отвечаю на вопросы, показываю погоду, курсы, ставлю напоминания.", parse_mode="Markdown")
+        await query.edit_message_text("📖 Отвечаю на вопросы (с памятью!), показываю погоду, курсы, ставлю напоминания.", parse_mode="Markdown")
     elif data == "gigachat":
-        await query.edit_message_text("Напиши свой вопрос для GigaChat.")
+        await query.edit_message_text("Напиши свой вопрос для GigaChat. Я запомню наш диалог.")
         context.user_data['awaiting'] = 'gigachat'
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
     chat_id = update.effective_chat.id
     awaiting = context.user_data.get('awaiting')
+
+    # Инициализация истории, если её нет
+    if 'history' not in context.user_data:
+        context.user_data['history'] = []
 
     if awaiting == 'weather_city':
         context.user_data['awaiting'] = None
@@ -121,10 +141,33 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     try:
-        chat_request = Chat(model="GigaChat-2", messages=[Messages(role=MessagesRole.USER, content=text)])
+        # --- СБОРКА ЗАПРОСА С ПАМЯТЬЮ И СИСТЕМНЫМ ПРОМПТОМ ---
+        messages = [
+            Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)
+        ]
+        
+        # Добавляем историю (последние 20 сообщений, чтобы не переполнить контекст)
+        for msg in context.user_data['history'][-20:]:
+            messages.append(Messages(role=msg['role'], content=msg['content']))
+        
+        # Добавляем текущее сообщение пользователя
+        messages.append(Messages(role=MessagesRole.USER, content=text))
+        
+        chat_request = Chat(model="GigaChat-2", messages=messages)
         response = client.chat(chat_request)
+        
         if response and response.choices:
-            await update.message.reply_text(f"🤖 <b>Ответ:</b>\n\n{response.choices[0].message.content}", parse_mode="HTML")
+            answer = response.choices[0].message.content
+            
+            # Сохраняем в историю (и вопрос, и ответ)
+            context.user_data['history'].append({'role': MessagesRole.USER, 'content': text})
+            context.user_data['history'].append({'role': MessagesRole.ASSISTANT, 'content': answer})
+            
+            # Ограничиваем историю 40 сообщениями (20 пар)
+            if len(context.user_data['history']) > 40:
+                context.user_data['history'] = context.user_data['history'][-40:]
+            
+            await update.message.reply_text(f"🤖 <b>Ответ:</b>\n\n{answer}", parse_mode="HTML")
         else:
             await update.message.reply_text("Пустой ответ от нейросети.")
     except Exception as e:
@@ -141,7 +184,6 @@ async def main():
         logging.error("FATAL: Токены не найдены.")
         return
 
-    # Запускаем Flask в отдельном потоке ДО инициализации бота
     threading.Thread(target=run_flask, daemon=True).start()
     print("✅ Flask-сервер для Render запущен.")
 
