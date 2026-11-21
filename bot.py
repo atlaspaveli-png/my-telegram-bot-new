@@ -4,13 +4,13 @@ import asyncio
 from datetime import timedelta
 from dotenv import load_dotenv
 
-import aiohttp  # <-- добавлен импорт, его не хватало
+import aiohttp
 
 # Импорты из python-telegram-bot
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
-    CallbackQueryHandler, PicklePersistence, filters
+    CallbackQueryHandler, filters
 )
 
 # Импорты GigaChat
@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Системный промпт (Твоя личность бота) ---
+# --- Системный промпт ---
 SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицированный и проактивный ассистент. Твоя главная цель — помогать мне решать задачи максимально эффективно, глубоко и качественно.
 Правила и стиль общения:
 1. Структурированность: Всегда представляй информацию в удобном виде: используй списки, подзаголовки, таблицы или выделение жирным, чтобы текст легко читался.
@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицир�
 Начнём."""
 
 
-# --- Вспомогательные функции (Погода и Валюта) ---
+# --- Вспомогательные функции ---
 async def get_weather(city: str) -> str:
     try:
         async with aiohttp.ClientSession() as session:
@@ -96,6 +96,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     data = query.data
 
+    # Безопасная инициализация на случай, если пользователь нажал кнопку без /start
+    if 'history' not in context.user_data:
+        context.user_data['history'] = []
+    if 'awaiting' not in context.user_data:
+        context.user_data['awaiting'] = None
+
     if data == "weather":
         await query.edit_message_text("Напиши город, для которого нужна погода (например: Москва)")
         context.user_data['awaiting'] = {'type': 'city_input'}
@@ -129,6 +135,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
     chat_id = update.effective_chat.id
+
+    # Безопасная инициализация для новых пользователей (без /start)
+    if 'history' not in context.user_data:
+        context.user_data['history'] = []
+    if 'awaiting' not in context.user_data:
+        context.user_data['awaiting'] = None
+
     awaiting_info = context.user_data.get('awaiting')
 
     # --- 1. Проверка на ввод данных после кнопок ---
@@ -183,10 +196,11 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     client = context.bot_data['gigachat_client']
     messages = [Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)]
 
-    history_limit = min(len(context.user_data['history']), 20)
-    recent_history = context.user_data['history'][-history_limit:]
+    history = context.user_data.get('history', [])
+    history_limit = min(len(history), 20)
+    recent_history = history[-history_limit:] if history_limit else []
 
-    for msg_dict in reversed(recent_history):
+    for msg_dict in recent_history:
         role_str = msg_dict.get('role')
         content = msg_dict.get('content')
         if role_str and content:
@@ -197,13 +211,15 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             }
             mapped_role = roles_map.get(role_str.lower())
             if mapped_role:
-                messages.insert(-1, Messages(role=mapped_role, content=content))
+                messages.append(Messages(role=mapped_role, content=content))
 
     messages.append(Messages(role=MessagesRole.USER, content=user_text))
 
     # --- 5. Запрос к API и ответ ---
     try:
-        response = client.chat(Chat(model="GigaChat-2", messages=messages))
+        response = await asyncio.to_thread(
+            client.chat, Chat(model="GigaChat-2", messages=messages)
+        )
 
         answer_content = ""
         if response and response.choices and response.choices[0].message.content:
@@ -222,6 +238,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     except Exception as e:
         error_msg = str(e).replace("\n", " ").replace("\r", "")
+        logger.error(f"Ошибка GigaChat: {error_msg}")
         await update.message.reply_text(
             f"⚠️ Ошибка связи с GigaChat:\n<code>{error_msg}</code>",
             parse_mode='HTML'
@@ -235,6 +252,18 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         text=f"⏰ *Напоминание:* {job.data['text']}",
         parse_mode='Markdown'
     )
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует ошибки и сообщает пользователю."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Произошла внутренняя ошибка. Попробуйте ещё раз."
+            )
+        except Exception:
+            pass
 
 
 # --- Точка входа ---
@@ -257,6 +286,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    application.add_error_handler(error_handler)
 
     logger.info("✅ Хендлеры зарегистрированы. Начинаю polling.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
