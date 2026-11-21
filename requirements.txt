@@ -5,3 +5,4 @@ aiohttp
 flask
 gunicorn
 uvicorn #
+caldav==0.8.1
