@@ -17,7 +17,6 @@ GIGACHAT_KEY = os.environ.get("GIGACHAT_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# --- СИСТЕМНЫЙ ПРОМПТ (РОЛЬ) ---
 SYSTEM_PROMPT = """Твоя роль: Ты — высококвалифицированный и проактивный ассистент. Твоя главная цель — помогать мне решать задачи максимально эффективно, глубоко и качественно.
 Правила и стиль общения:
 1. Структурированность: Всегда представляй информацию в удобном виде: используй списки, подзаголовки, таблицы или выделение жирным, чтобы текст легко читался.
@@ -65,10 +64,21 @@ async def get_currency() -> str:
     except Exception as e:
         return f"Ошибка: {e}"
 
+# --- POST_INIT: ИНИЦИАЛИЗАЦИЯ GIGACHAT ПОСЛЕ ЗАГРУЗКИ PERSISTENCE ---
+async def post_init(application: Application) -> None:
+    """Вызывается после загрузки всех данных из Persistence."""
+    # Создаём клиента GigaChat здесь, чтобы он не перезаписался старым bot_data
+    giga_client = GigaChat(
+        scope="GIGACHAT_API_PERS",
+        credentials=GIGACHAT_KEY,
+        verify_ssl_certs=False
+    )
+    application.bot_data['gigachat_client'] = giga_client
+    logging.info("✅ GigaChat клиент инициализирован в post_init.")
+
 # --- ОБРАБОТЧИКИ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name
-    # Очищаем историю при старте
     context.user_data['history'] = []
     keyboard = [
         [InlineKeyboardButton("🌤 Погода", callback_data="weather"),
@@ -106,7 +116,6 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     awaiting = context.user_data.get('awaiting')
 
-    # Инициализация истории, если её нет
     if 'history' not in context.user_data:
         context.user_data['history'] = []
 
@@ -136,21 +145,14 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     client = context.bot_data.get('gigachat_client')
     if not client:
-        await update.message.reply_text("GigaChat не инициализирован.")
+        await update.message.reply_text("Клиент GigaChat не инициализирован. Попробуйте /start.")
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     try:
-        # --- СБОРКА ЗАПРОСА С ПАМЯТЬЮ И СИСТЕМНЫМ ПРОМПТОМ ---
-        messages = [
-            Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)
-        ]
-        
-        # Добавляем историю (последние 20 сообщений, чтобы не переполнить контекст)
+        messages = [Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)]
         for msg in context.user_data['history'][-20:]:
             messages.append(Messages(role=msg['role'], content=msg['content']))
-        
-        # Добавляем текущее сообщение пользователя
         messages.append(Messages(role=MessagesRole.USER, content=text))
         
         chat_request = Chat(model="GigaChat-2", messages=messages)
@@ -158,15 +160,10 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         if response and response.choices:
             answer = response.choices[0].message.content
-            
-            # Сохраняем в историю (и вопрос, и ответ)
             context.user_data['history'].append({'role': MessagesRole.USER, 'content': text})
             context.user_data['history'].append({'role': MessagesRole.ASSISTANT, 'content': answer})
-            
-            # Ограничиваем историю 40 сообщениями (20 пар)
             if len(context.user_data['history']) > 40:
                 context.user_data['history'] = context.user_data['history'][-40:]
-            
             await update.message.reply_text(f"🤖 <b>Ответ:</b>\n\n{answer}", parse_mode="HTML")
         else:
             await update.message.reply_text("Пустой ответ от нейросети.")
@@ -187,17 +184,13 @@ async def main():
     threading.Thread(target=run_flask, daemon=True).start()
     print("✅ Flask-сервер для Render запущен.")
 
-    # --- ДОБАВЛЕНА ПОСТОЯННАЯ ПАМЯТЬ (PicklePersistence) ---
     persistence = PicklePersistence(filepath="bot_persistence.pkl")
-    
-    giga_client = GigaChat(scope="GIGACHAT_API_PERS", credentials=GIGACHAT_KEY, verify_ssl_certs=False)
     
     application = Application.builder()\
         .token(TOKEN)\
         .persistence(persistence)\
+        .post_init(post_init)\
         .build()
-    
-    application.bot_data['gigachat_client'] = giga_client
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
