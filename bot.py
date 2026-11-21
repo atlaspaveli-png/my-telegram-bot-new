@@ -64,18 +64,6 @@ async def get_currency() -> str:
     except Exception as e:
         return f"Ошибка: {e}"
 
-# --- POST_INIT: ИНИЦИАЛИЗАЦИЯ GIGACHAT ПОСЛЕ ЗАГРУЗКИ PERSISTENCE ---
-async def post_init(application: Application) -> None:
-    """Вызывается после загрузки всех данных из Persistence."""
-    # Создаём клиента GigaChat здесь, чтобы он не перезаписался старым bot_data
-    giga_client = GigaChat(
-        scope="GIGACHAT_API_PERS",
-        credentials=GIGACHAT_KEY,
-        verify_ssl_certs=False
-    )
-    application.bot_data['gigachat_client'] = giga_client
-    logging.info("✅ GigaChat клиент инициализирован в post_init.")
-
 # --- ОБРАБОТЧИКИ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name
@@ -143,10 +131,21 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"✅ Напоминание через {delay} мин.: {reminder_text}")
         return
 
+    # --- СОЗДАЁМ КЛИЕНТА GIGACHAT ПРЯМО ЗДЕСЬ, ЕСЛИ ЕГО НЕТ ---
     client = context.bot_data.get('gigachat_client')
     if not client:
-        await update.message.reply_text("Клиент GigaChat не инициализирован. Попробуйте /start.")
-        return
+        try:
+            client = GigaChat(
+                scope="GIGACHAT_API_PERS",
+                credentials=GIGACHAT_KEY,
+                verify_ssl_certs=False
+            )
+            context.bot_data['gigachat_client'] = client
+            logging.info("✅ GigaChat клиент создан в обработчике echo.")
+        except Exception as e:
+            logging.error(f"Не удалось создать клиента GigaChat: {e}")
+            await update.message.reply_text(f"Ошибка инициализации GigaChat: {e}")
+            return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     try:
@@ -189,7 +188,6 @@ async def main():
     application = Application.builder()\
         .token(TOKEN)\
         .persistence(persistence)\
-        .post_init(post_init)\
         .build()
 
     application.add_handler(CommandHandler("start", start))
