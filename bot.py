@@ -60,15 +60,9 @@ async def get_currency() -> str:
 
 # --- Обработчики ---
 
-# Оборачиваем каждую асинхронную функцию-обработчик
-def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Внутри этой функции будет вызываться твоя асинхронная логика
-    from asgiref.sync import async_to_sync
-    _start_async = async_to_async(start_async)
-    return _start_async(update, context)
-
-async def start_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name or "Пользователь"
+    # Полная очистка данных пользователя при старте
     context.user_data.clear()
     context.user_data['history'] = []
     context.user_data['awaiting'] = None
@@ -89,20 +83,46 @@ async def start_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_html(greeting, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ... То же самое сделай для всех остальных обработчиков ...
-# Ниже я привожу полный пример с функцией echo, но принцип тот же для button_handler и других.
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
 
-def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from asgiref.sync import async_to_sync
-    _echo_async = async_to_sync(echo_async)
-    return _echo_async(update, context)
+    if data == "weather":
+        await query.edit_message_text("Напиши город, для которого нужна погода (например: Москва)")
+        context.user_data['awaiting'] = {'type': 'city_input'}
+        
+    elif data == "currency":
+        message_text = await get_currency()
+        try:
+            await query.edit_message_text(message_text, parse_mode='HTML')
+        except Exception:
+            await query.message.reply_text(message_text, parse_mode='HTML')
+            
+    elif data == "remind":
+        text = f"⏰ Напиши текст напоминания.\n\nПример:\nНапомнить мне через 5 минут позвонить маме."
+        await query.edit_message_text(text)
+        context.user_data['awaiting'] = {'type': 'reminder_setup'}
+        
+    elif data == "help":
+        help_text = """📖 Я умею:
+• Отвечать на вопросы (с памятью!)
+• Показывать погоду 🌤
+• Курсы валют 💱
+• Ставить напоминания ⏰
+• Работать с GigaChat 🤖"""
+        await query.edit_message_text(help_text, parse_mode='Markdown')
+        
+    elif data == "gigachat":
+        await query.edit_message_text("❓ Задай свой вопрос здесь.")
+        context.user_data['awaiting'] = {'type': 'free_question'}
 
-async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
     chat_id = update.effective_chat.id
-    
     awaiting_info = context.user_data.get('awaiting')
-    
+
+    # --- 1. Проверка на ввод данных после кнопок ---
     if awaiting_info and awaiting_info.get('type') == 'city_input':
         city = user_text.strip()
         weather_msg = await get_weather(city)
@@ -133,6 +153,7 @@ async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         context.user_data.pop('awaiting', None)
         return
 
+    # --- 2. Инициализация GigaChat (Один раз на бота) ---
     if 'gigachat_client' not in context.bot_data:
         try:
             context.bot_data['gigachat_client'] = GigaChat(
@@ -146,8 +167,10 @@ async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text("❌ Ошибка подключения к GigaChat. Попробуй позже.")
             return
 
+    # --- 3. Отправка статуса "печатает" ---
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
+    # --- 4. Формирование запроса ---
     client = context.bot_data['gigachat_client']
     messages = [Messages(role=MessagesRole.SYSTEM, content=SYSTEM_PROMPT)]
     
@@ -160,7 +183,7 @@ async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if role_str and content:
             roles_map = {
                 'user': MessagesRole.USER,
-                'assector': MessagesRole.ASSISTANT,
+                'assistant': MessagesRole.ASSISTANT, # Исправлена опечатка 'assector'
                 'system': MessagesRole.SYSTEM
             }
             mapped_role = roles_map.get(role_str.lower())
@@ -169,6 +192,7 @@ async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     messages.append(Messages(role=MessagesRole.USER, content=user_text))
 
+    # --- 5. Запрос к API и ответ ---
     try:
         response = client.chat(Chat(model="GigaChat-2", messages=messages))
         
@@ -177,7 +201,7 @@ async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             answer_content = response.choices[0].message.content
             
             context.user_data['history'].append({'role':'user','content':user_text})
-            context.user_data['history'].append({'role':'assistant','content':answer_content})
+            context.user_data['history'].append({'role':'assistant','content':answer_content}) # Исправлено 'assector'
             
             if len(context.user_data['history']) > 40:
                 context.user_data['history'] = context.user_data['history'][-40:]
@@ -190,3 +214,36 @@ async def echo_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         error_msg = str(e).replace("\n", " ").replace("\r", "")
         await update.message.reply_text(f"⚠️ Ошибка связи с GigaChat:\n<code>{error_msg}</code>", parse_mode='HTML')
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    await context.bot.send_message(chat_id=job.data['chat_id'], text=f"⏰ *Напоминание:* {job.data['text']}", parse_mode='Markdown')
+
+# --- ГЛАВНАЯ ТОЧКА ЗАПУСКА ---
+async def main():
+    if not TOKEN or not GIGACHAT_KEY:
+        logging.error("FATAL: Токены не найдены в переменных окружения.")
+        return
+
+    persistence = PicklePersistence(filepath="bot_persistence.pkl")
+    
+    application = ApplicationBuilder()\
+        .token(TOKEN)\
+        .persistence(persistence)\
+        .concurrent_updates(True)\
+        .build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+    print("✅ Бот запущен. Память сохраняется в bot_persistence.pkl.")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+
+    # Чтобы бот работал бесконечно
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
