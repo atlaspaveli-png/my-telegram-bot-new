@@ -3,3 +3,4 @@ gigachat==0.2.4
 python-dotenv
 aiohttp
 flask
+gunicorn
